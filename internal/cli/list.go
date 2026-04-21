@@ -13,6 +13,7 @@ import (
 	"github.com/warpstreamlabs/bento/internal/cli/common"
 	"github.com/warpstreamlabs/bento/internal/config/schema"
 	"github.com/warpstreamlabs/bento/internal/cuegen"
+	"github.com/warpstreamlabs/bento/internal/kclgen"
 )
 
 func listCliCommand(opts *common.CLIOpts) *cli.Command {
@@ -30,7 +31,7 @@ components will be shown.
 			&cli.StringFlag{
 				Name:  "format",
 				Value: "text",
-				Usage: "Print the component list in a specific format. Options are text, json or cue.",
+				Usage: "Print the component list in a specific format. Options are text, json, cue or kcl.",
 			},
 			&cli.StringFlag{
 				Name:  "status",
@@ -117,6 +118,12 @@ func listComponents(c *cli.Context, opts *common.CLIOpts) {
 		fmt.Println(string(jsonBytes))
 	case "cue":
 		source, err := cuegen.GenerateSchema(schema)
+		if err != nil {
+			panic(err)
+		}
+		fmt.Println(string(source))
+	case "kcl":
+		source, err := kclgen.GenerateSchema(schema)
 		if err != nil {
 			panic(err)
 		}

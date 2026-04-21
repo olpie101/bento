@@ -106,6 +106,12 @@ test-integration:
 	$(warning WARNING! Running the integration tests in their entirety consumes a huge amount of computing resources and is likely to time out on most machines. It's recommended that you instead run the integration suite for connectors you are working selectively with `go test -run 'TestIntegration/kafka' ./...` and so on.)
 	@go test $(GO_FLAGS) -ldflags "$(LD_FLAGS)" -run "^Test.*Integration.*$$" -timeout 5m ./...
 
+test-kcl: $(APPS) ## Lint the generated KCL schema (requires the `kcl` CLI)
+	@command -v kcl >/dev/null 2>&1 || { echo "kcl CLI not found on PATH; install from https://kcl-lang.io"; exit 1; }
+	@tmp=$$(mktemp -d) && trap "rm -rf $$tmp" EXIT; \
+		$(PATHINSTBIN)/bento list --format kcl > $$tmp/schema.k && \
+		kcl lint $$tmp/schema.k
+
 clean:
 	rm -rf $(PATHINSTBIN)
 	rm -rf $(DEST_DIR)/dist
