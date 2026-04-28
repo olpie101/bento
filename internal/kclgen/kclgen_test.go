@@ -1,6 +1,9 @@
 package kclgen
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -100,8 +103,14 @@ func TestGenerateSchemaSortsComponents(t *testing.T) {
 	}
 
 	// The union schema's variant list should also be sorted.
-	if !strings.Contains(src, "_variants?: [any] = [aaa, mmm, zzz]") {
+	if !strings.Contains(src, `len([x for x in [aaa, mmm, zzz] if x != Undefined]) == 1`) {
 		t.Errorf("union variants not sorted alphabetically\n---\n%s", src)
+	}
+	// The `_variants` helper attribute must NOT be emitted — attributes
+	// with leading underscores can still leak into rendered YAML, so the
+	// variant list is inlined in the check expression instead.
+	if strings.Contains(src, "_variants") {
+		t.Errorf("generator still emits _variants helper attribute\n---\n%s", src)
 	}
 }
 
@@ -254,9 +263,8 @@ func TestGenerateSchemaShape(t *testing.T) {
 		"schema Input:",
 		"mixin [LabelMixin, ProcessorsMixin]",
 		"generate?: GenerateInput",
-		"_variants?: [any] = [generate]",
 		"check:",
-		`len([x for x in _variants if x != Undefined]) == 1, "exactly one input variant must be set"`,
+		`len([x for x in [generate] if x != Undefined]) == 1, "exactly one input variant must be set"`,
 		"schema LabelMixin:",
 		"schema ProcessorsMixin:",
 		"protocol InputProtocol:",
@@ -320,3 +328,131 @@ func TestGenerateSchemaDedupesStructuralDuplicates(t *testing.T) {
 	}
 }
 
+
+// TestVariantsNotLeakedInYAML shells out to the `kcl` CLI to verify that
+// the check-block variant guard does not introduce a `_variants` attribute
+// that leaks into the rendered YAML. Skipped when `kcl` is not installed.
+func TestVariantsNotLeakedInYAML(t *testing.T) {
+	if _, err := exec.LookPath("kcl"); err != nil {
+		t.Skip("kcl CLI not installed; skipping runtime yaml check")
+	}
+
+	sch := schema.Full{
+		Version: "test",
+		Date:    "now",
+		Config: docs.FieldSpecs{
+			docs.FieldInput("input", "The input."),
+			docs.FieldOutput("output", "The output."),
+		},
+		Inputs: []docs.ComponentSpec{{
+			Name: "generate",
+			Type: docs.TypeInput,
+			Config: docs.FieldObject("", "").WithChildren(
+				docs.FieldString("mapping", "A bloblang mapping."),
+			),
+		}},
+		Outputs: []docs.ComponentSpec{{
+			Name: "stdout",
+			Type: docs.TypeOutput,
+			Config: docs.FieldObject("", "").WithChildren(
+				docs.FieldString("codec", "Output codec.").HasDefault("lines"),
+			),
+		}},
+	}
+
+	out, err := GenerateSchema(sch)
+	if err != nil {
+		t.Fatalf("GenerateSchema: %v", err)
+	}
+	if strings.Contains(string(out), "_variants") {
+		t.Fatalf("generated schema still contains `_variants`:\n%s", out)
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "bento.k"), out, 0o644); err != nil {
+		t.Fatalf("write bento.k: %v", err)
+	}
+	usage := `import bento as b
+
+cfg: b.Config = {
+    input = b.Input { generate = b.GenerateInput { mapping = "root = {}" } }
+    output = b.Output { stdout = b.StdoutOutput {} }
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "use.k"), []byte(usage), 0o644); err != nil {
+		t.Fatalf("write use.k: %v", err)
+	}
+
+	cmd := exec.Command("kcl", "run", "use.k", "bento.k")
+	cmd.Dir = dir
+	gotOut, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("kcl run failed: %v\n%s", err, gotOut)
+	}
+	if strings.Contains(string(gotOut), "_variants") {
+		t.Errorf("_variants leaked into YAML output:\n%s", gotOut)
+	}
+	// Sanity: the happy variant must round-trip.
+	if !strings.Contains(string(gotOut), "generate:") || !strings.Contains(string(gotOut), "stdout:") {
+		t.Errorf("expected generate/stdout in yaml output:\n%s", gotOut)
+	}
+}
+
+// TestVariantCheckRejectsMultipleVariants confirms that the inlined
+// single-variant check still enforces the invariant it used to enforce
+// when phrased in terms of `_variants`.
+func TestVariantCheckRejectsMultipleVariants(t *testing.T) {
+	if _, err := exec.LookPath("kcl"); err != nil {
+		t.Skip("kcl CLI not installed; skipping runtime check")
+	}
+
+	sch := schema.Full{
+		Version: "test",
+		Date:    "now",
+		Config: docs.FieldSpecs{docs.FieldInput("input", "The input.")},
+		Inputs: []docs.ComponentSpec{
+			{
+				Name: "a",
+				Type: docs.TypeInput,
+				Config: docs.FieldObject("", "").WithChildren(
+					docs.FieldString("x", "").HasDefault(""),
+				),
+			},
+			{
+				Name: "b",
+				Type: docs.TypeInput,
+				Config: docs.FieldObject("", "").WithChildren(
+					docs.FieldString("y", "").HasDefault(""),
+				),
+			},
+		},
+	}
+
+	out, err := GenerateSchema(sch)
+	if err != nil {
+		t.Fatalf("GenerateSchema: %v", err)
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "bento.k"), out, 0o644); err != nil {
+		t.Fatalf("write bento.k: %v", err)
+	}
+	// Two variants set — must trigger the check.
+	bad := `import bento as b
+
+cfg: b.Input = { a = b.AInput {}, b = b.BInput {} }
+`
+	if err := os.WriteFile(filepath.Join(dir, "bad.k"), []byte(bad), 0o644); err != nil {
+		t.Fatalf("write bad.k: %v", err)
+	}
+
+	cmd := exec.Command("kcl", "run", "bad.k", "bento.k")
+	cmd.Dir = dir
+	gotOut, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected kcl check failure, got success:\n%s", gotOut)
+	}
+	if !strings.Contains(string(gotOut), "exactly one input variant must be set") {
+		t.Errorf("expected single-variant check error in output, got:\n%s", gotOut)
+	}
+}

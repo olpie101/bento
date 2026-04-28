@@ -60,6 +60,33 @@ func goldenFixture() schema.Full {
 		),
 	}
 
+	// Array-of-processor root: `try: [Processor]`.
+	tryProc := docs.ComponentSpec{
+		Name:    "try",
+		Type:    docs.TypeProcessor,
+		Summary: "Executes a list of child processors.",
+		Config:  docs.FieldProcessor("", "").Array(),
+	}
+
+	// Scalar-rooted processor: `mapping: str`.
+	mappingProc := docs.ComponentSpec{
+		Name:    "mapping",
+		Type:    docs.TypeProcessor,
+		Summary: "Executes a Bloblang mapping.",
+		Config:  docs.FieldString("", ""),
+	}
+
+	// Array-of-object root: `switch: [{case, processors}]`.
+	switchProc := docs.ComponentSpec{
+		Name:    "switch",
+		Type:    docs.TypeProcessor,
+		Summary: "Conditionally routes messages to processors.",
+		Config: docs.FieldObject("", "").WithChildren(
+			docs.FieldString("check", "A Bloblang check expression.").Optional(),
+			docs.FieldProcessor("processors", "Processors to apply when the case matches.").Array(),
+		).Array(),
+	}
+
 	return schema.Full{
 		Version: "golden",
 		Date:    "test",
@@ -67,8 +94,9 @@ func goldenFixture() schema.Full {
 			docs.FieldInput("input", "The input."),
 			docs.FieldOutput("output", "The output."),
 		},
-		Inputs:  []docs.ComponentSpec{generate, httpClient},
-		Outputs: []docs.ComponentSpec{stdout},
+		Inputs:     []docs.ComponentSpec{generate, httpClient},
+		Outputs:    []docs.ComponentSpec{stdout},
+		Processors: []docs.ComponentSpec{tryProc, mappingProc, switchProc},
 	}
 }
 

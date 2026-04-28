@@ -63,33 +63,68 @@ func (w *writer) writeComponents(specs []docs.ComponentSpec, kind componentKind)
 
 	// Stable ordering comes from the caller; we preserve it.
 	type componentEntry struct {
-		yamlName   string
-		schemaName string
-		summary    string
+		yamlName string
+		// typeExpr is the full right-hand side of the union attribute
+		// declaration, e.g. `MyProcessor`, `[Processor]`, or `str`.
+		typeExpr string
+		summary  string
 	}
 	entries := make([]componentEntry, 0, len(specs))
 
 	for _, cs := range specs {
-		schemaName := w.uniqueName(toSchemaName(cs.Name) + kind.componentSuffix)
-
-		fields := cs.Config.Children
-		// If the config isn't an object (e.g. a scalar-only component),
-		// surface the single field as the sole attribute.
-		if cs.Config.Type != docs.FieldTypeObject && cs.Config.Kind == "" && len(cs.Config.Children) == 0 {
-			fields = docs.FieldSpecs{cs.Config}
+		entry := componentEntry{
+			yamlName: cs.Name,
+			summary:  cs.Summary,
 		}
 
-		w.pending = append(w.pending, pendingSchema{
-			name:   schemaName,
-			doc:    cs.Summary,
-			fields: fields,
-		})
+		// Classify the component root shape. Bento models several
+		// list/scalar-rooted components (e.g. `try: [Processor]`,
+		// `mapping: str`, `switch: [SwitchCase]`) as field specs with
+		// a non-empty Kind at the root. These cannot be represented as
+		// a KCL record schema, so we inline the type at the union site
+		// and skip emitting a dedicated component schema.
+		switch {
+		case cs.Config.Type == docs.FieldTypeObject && cs.Config.Kind == docs.KindArray:
+			// Array-of-object root (e.g. switch). Emit a dedicated
+			// element schema from Children and reference it as a list
+			// at the union site.
+			elementName := w.uniqueName(toSchemaName(cs.Name) + kind.componentSuffix + "Case")
+			w.pending = append(w.pending, pendingSchema{
+				name:   elementName,
+				doc:    cs.Summary,
+				fields: cs.Config.Children,
+			})
+			entry.typeExpr = "[" + elementName + "]"
 
-		entries = append(entries, componentEntry{
-			yamlName:   cs.Name,
-			schemaName: schemaName,
-			summary:    cs.Summary,
-		})
+		case cs.Config.Type == docs.FieldTypeObject:
+			// Object root (Kind == "" or KindScalar): emit a dedicated
+			// record schema. An empty Children list renders as the
+			// `_empty?: any` placeholder — intentional for YAML-empty
+			// components like `drop: {}`, `noop: {}`, `sync_response: {}`.
+			schemaName := w.uniqueName(toSchemaName(cs.Name) + kind.componentSuffix)
+			w.pending = append(w.pending, pendingSchema{
+				name:   schemaName,
+				doc:    cs.Summary,
+				fields: cs.Config.Children,
+			})
+			entry.typeExpr = schemaName
+
+		default:
+			// Non-object root: render the type inline via the generic
+			// renderType path. Handles, for example:
+			//   Type=string  Kind=""/Scalar -> str
+			//   Type=string  Kind=Array     -> [str]
+			//   Type=processor Kind=Array   -> [Processor]
+			//   Type=output  Kind=""/Scalar -> Output
+			//   Type=output  Kind=Array     -> [Output]
+			expr, err := w.renderType(cs.Config, "")
+			if err != nil {
+				return fmt.Errorf("rendering root type for %s: %w", cs.Name, err)
+			}
+			entry.typeExpr = expr
+		}
+
+		entries = append(entries, entry)
 	}
 
 	// Drain component schemas first so the union schema appears after all
@@ -129,16 +164,17 @@ func (w *writer) writeComponents(specs []docs.ComponentSpec, kind componentKind)
 			w.writeLineComment(e.summary)
 		}
 		attr := escapeFieldName(e.yamlName)
-		w.line(attr + "?: " + e.schemaName)
+		w.line(attr + "?: " + e.typeExpr)
 		attrNames = append(attrNames, attr)
 	}
 
-	// Emit a `_variants` helper list and a `check:` block enforcing the
-	// single-variant constraint. Attributes prefixed with `_` are excluded
-	// from the rendered YAML by KCL, so this is invisible to Bento.
+	// Emit a `check:` block enforcing the single-variant constraint.
+	// The variant list is inlined directly in the expression so no
+	// helper attribute is added to the schema — KCL's `_` prefix hides
+	// attributes from the rendered YAML in most contexts, but inlining
+	// removes any chance of leakage.
 	if len(attrNames) > 0 {
 		w.blank()
-		w.line("_variants?: [any] = [" + strings.Join(attrNames, ", ") + "]")
 		w.line("check:")
 		w.indent++
 		op := "<="
@@ -150,8 +186,8 @@ func (w *writer) writeComponents(specs []docs.ComponentSpec, kind componentKind)
 			msg = fmt.Sprintf("exactly one %s variant must be set", kind.noun)
 		}
 		w.line(fmt.Sprintf(
-			"len([x for x in _variants if x != Undefined]) %s 1, %q",
-			op, msg,
+			"len([x for x in [%s] if x != Undefined]) %s 1, %q",
+			strings.Join(attrNames, ", "), op, msg,
 		))
 		w.indent--
 	}

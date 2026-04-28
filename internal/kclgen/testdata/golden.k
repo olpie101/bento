@@ -55,9 +55,8 @@ schema Input:
     # Consume messages from an HTTP endpoint.
     http_client?: HttpClientInput
 
-    _variants?: [any] = [generate, http_client]
     check:
-        len([x for x in _variants if x != Undefined]) == 1, "exactly one input variant must be set"
+        len([x for x in [generate, http_client] if x != Undefined]) == 1, "exactly one input variant must be set"
 
 schema StdoutOutput:
     r"""Write to stdout."""
@@ -69,12 +68,27 @@ schema Output:
     # Write to stdout.
     stdout?: StdoutOutput
 
-    _variants?: [any] = [stdout]
     check:
-        len([x for x in _variants if x != Undefined]) == 1, "exactly one output variant must be set"
+        len([x for x in [stdout] if x != Undefined]) == 1, "exactly one output variant must be set"
+
+schema SwitchProcessorCase:
+    r"""Conditionally routes messages to processors."""
+    # A Bloblang check expression.
+    $check?: str
+    # Processors to apply when the case matches.
+    processors?: [Processor]
 
 schema Processor:
     mixin [LabelMixin]
+    # Executes a Bloblang mapping.
+    mapping?: str
+    # Conditionally routes messages to processors.
+    switch?: [SwitchProcessorCase]
+    # Executes a list of child processors.
+    try?: [Processor]
+
+    check:
+        len([x for x in [mapping, switch, try] if x != Undefined]) == 1, "exactly one processor variant must be set"
 
 schema Cache:
     mixin [LabelMixin]
